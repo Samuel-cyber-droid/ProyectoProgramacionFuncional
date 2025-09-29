@@ -1,0 +1,30 @@
+[
+    {
+        "nombre": "Recicla-Todo CDMX",
+        "lat": 19.4326,
+        "lon": -99.1332,
+        "horario": "L-V 9:00-18:00",
+        "materiales": ["plástico", "vidrio", "papel", "cartón"]
+    },
+    {
+        "nombre": "Eco-Punto Reforma",
+        "lat": 19.4269,
+        "lon": -99.1623,
+        "horario": "L-S 8:00-20:00",
+        "materiales": ["plástico", "electrónicos", "baterías"]
+    },
+    {
+        "nombre": "Verde Norte",
+        "lat": 19.4939,
+        "lon": -99.1444,
+        "horario": "M-D 10:00-16:00",
+        "materiales": ["vidrio", "orgánico", "aceite de cocina"]
+    },
+    {
+        "nombre": "Sur Sustentable",
+        "lat": 19.3453,
+        "lon": -99.1621,
+        "horario": "L-V 9:00-17:00",
+        "materiales": ["papel", "cartón", "plástico", "latas"]
+    }
+]
