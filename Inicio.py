@@ -1,7 +1,7 @@
 import streamlit as st
 
 st.set_page_config(
-    page_title="Proyecto Final",
+    page_title="Centro de Reciclaje",
     page_icon="♻️",
 )
 
