@@ -1,21 +1,27 @@
 import streamlit as st
 
+# Configuración de la página, usando 'layout="wide"' para que el contenido ocupe todo el ancho de la pantalla.
 st.set_page_config(
     page_title="Buenas Prácticas de Reciclaje",
     page_icon="♻️",
     layout="wide"
 )
 
+# --- TÍTULO Y DESCRIPCIÓN ---
 st.title("♻️ Guía de Buenas Prácticas de Reciclaje")
 st.markdown(
     "Adoptar hábitos sencillos puede marcar una gran diferencia. Aquí tienes algunos consejos clave para reciclar de manera más efectiva.")
 st.markdown("---")
 
-# --- Usamos columnas para un diseño más atractivo ---
+# --- CONTENIDO PRINCIPAL EN DOS COLUMNAS ---
+# Usamos columnas para presentar la información de una manera más atractiva y fácil de leer,
+# evitando una lista vertical muy larga.
 col1, col2 = st.columns(2, gap="large")
 
+# Contenido de la primera columna.
 with col1:
     st.subheader("🧼 1. Limpia los Envases")
+    # st.info crea una caja azul, ideal para resaltar información o consejos clave.
     st.info(
         """
         **¿Por qué?** Los restos de comida pueden contaminar lotes enteros de material reciclable, haciéndolos inutilizables.
@@ -39,6 +45,7 @@ with col1:
         """
     )
 
+# Contenido de la segunda columna.
 with col2:
     st.subheader("💧 2. Aplasta las Botellas y Latas")
     st.info(
@@ -69,4 +76,5 @@ with col2:
     )
 
 st.markdown("---")
+# st.success crea una caja verde, perfecta para un mensaje final de conclusión o éxito.
 st.success("¡Cada pequeña acción cuenta para construir un futuro más sostenible! Gracias por tu esfuerzo.")
