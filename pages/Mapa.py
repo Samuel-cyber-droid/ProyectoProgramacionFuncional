@@ -7,13 +7,55 @@ from typing import List
 from math import radians, sin, cos, sqrt, atan2
 
 # Componentes de UI
-from streamlit_geolocator import geolocator
 import folium
 from streamlit_folium import st_folium
 
 # Firebase (para la base de datos)
 import firebase_admin
 from firebase_admin import credentials, firestore
+
+
+# ====================================================================
+# --- FUNCIÓN ALTERNATIVA PARA GEOLOCALIZACIÓN ---
+# ====================================================================
+def get_user_location():
+    """Obtiene la ubicación del usuario usando inputs manuales"""
+    try:
+        # Verificamos si ya tenemos la ubicación en session_state
+        if 'user_location' in st.session_state:
+            return st.session_state.user_location
+
+        # Si no, pedimos la ubicación manualmente
+        st.sidebar.subheader("📍 Ingresa tu ubicación")
+        col1, col2 = st.sidebar.columns(2)
+        with col1:
+            lat = st.number_input("Latitud", value=19.4326, format="%.6f", key="lat_input")
+        with col2:
+            lon = st.number_input("Longitud", value=-99.1332, format="%.6f", key="lon_input")
+
+        # Botón para confirmar ubicación
+        if st.sidebar.button("Usar esta ubicación"):
+            location = type('obj', (object,), {
+                'latitude': lat,
+                'longitude': lon
+            })()
+            st.session_state.user_location = location
+            st.rerun()
+
+        # Por defecto, usamos los valores actuales
+        return type('obj', (object,), {
+            'latitude': lat,
+            'longitude': lon
+        })()
+
+    except Exception as e:
+        st.error(f"Error obteniendo ubicación: {e}")
+        # Valores por defecto (CDMX)
+        return type('obj', (object,), {
+            'latitude': 19.4326,
+            'longitude': -99.1332
+        })()
+
 
 # ====================================================================
 # --- BLOQUE 2: CONEXIÓN A FIREBASE (con st.secrets) ---
@@ -60,7 +102,7 @@ def load_and_create_centros(_db) -> List['CentroReciclaje']:
         return []
 
     print("--- LEYENDO DATOS DESDE FIREBASE ---")
-    centros_ref = _db.collection('centros_reciclaje') # <-- Apuntando a tu colección
+    centros_ref = _db.collection('centros_reciclaje')  # <-- Apuntando a tu colección
     docs = centros_ref.stream()
 
     lista_centros = []
@@ -90,6 +132,7 @@ def load_and_create_centros(_db) -> List['CentroReciclaje']:
 
 class CentroReciclaje:
     """Clase que representa un único centro de reciclaje. Modela la estructura de nuestros datos."""
+
     def __init__(self, nombre=None, lat=None, lon=None, horario=None, materiales=None, ubicacion=None, **kwargs):
         """
         Constructor robusto que acepta campos de Firebase.
@@ -115,6 +158,7 @@ class CentroReciclaje:
         else:
             # Si 'materiales' es None o no existe, crea una lista vacía
             self.materiales = []
+
 
 # ====================================================================
 # --- BLOQUE 4: PARADIGMA LÓGICO (Motor de Reglas) ---
@@ -210,6 +254,7 @@ def load_rules(_db) -> List[Regla]:
     except Exception as e:
         st.error(f"Error al leer la colección 'reglas' de Firebase: {e}")
         return []
+
 
 # ====================================================================
 # --- BLOQUE 5: PARADIGMA POO (Lógica de Negocio) Y FUNCIONAL ---
@@ -321,7 +366,9 @@ try:
 
         st.sidebar.markdown("---")
         st.sidebar.subheader("📍 Encuentra el más cercano")
-        location = geolocator(key='get_user_location')
+
+        # USAMOS LA NUEVA FUNCIÓN EN LUGAR DE streamlit_geolocator
+        location = get_user_location()
 
         # 4. PROCESAMIENTO PRINCIPAL
         user_lat, user_lon = None, None
