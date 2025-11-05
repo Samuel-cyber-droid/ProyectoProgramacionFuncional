@@ -1,6 +1,6 @@
 import streamlit as st
 
-# Configuración de la página, usando 'layout="wide"' para que el contenido ocupe todo el ancho de la pantalla.
+# Configuración de la página, usando 'layout="wide"' para que el contenido ocupe_todo el ancho de la pantalla.
 st.set_page_config(
     page_title="Buenas Prácticas de Reciclaje",
     page_icon="♻️",
