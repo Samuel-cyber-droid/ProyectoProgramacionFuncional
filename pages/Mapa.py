@@ -7,7 +7,7 @@ from typing import List
 from math import radians, sin, cos, sqrt, atan2
 
 # Componentes de UI
-from streamlit_geolocation import streamlit_geolocation
+from streamlit_geolocator import geolocator
 import folium
 from streamlit_folium import st_folium
 
@@ -321,14 +321,14 @@ try:
 
         st.sidebar.markdown("---")
         st.sidebar.subheader("📍 Encuentra el más cercano")
-        location = streamlit_geolocation()
+        location = geolocator(key='get_user_location')
 
         # 4. PROCESAMIENTO PRINCIPAL
         user_lat, user_lon = None, None
         nearest_center = None
 
-        if location and location.get('latitude'):
-            user_lat, user_lon = location['latitude'], location['longitude']
+        if location and location.latitude:
+            user_lat, user_lon = location.latitude, location.longitude
             st.sidebar.success(f"Ubicación obtenida: Lat: {user_lat:.4f}, Lon: {user_lon:.4f}")
             # 5. LÓGICA FUNCIONAL (sort)
             filtered_centros = recomendador.sort_by_distance(user_lat, user_lon, filtered_centros)
