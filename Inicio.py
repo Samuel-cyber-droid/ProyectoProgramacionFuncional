@@ -13,6 +13,19 @@ st.set_page_config(
     layout="centered"  # 'centered' mantiene el contenido en un ancho fijo y legible.
 )
 
+# ---   ANALYTICS    ---
+GOOGLE_ANALYTICS_SCRIPT= """
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-GHWRR564SW"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+    
+      gtag('config', 'G-GHWRR564SW');
+    </script>
+"""
+st.html(GOOGLE_ANALYTICS_SCRIPT)
+
 # --- GESTIÓN DE RUTAS A RECURSOS (ASSETS) ---
 # Definimos una carpeta base para los recursos gráficos.
 assets_dir = "assets"

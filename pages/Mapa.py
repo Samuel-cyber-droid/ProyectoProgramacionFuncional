@@ -239,6 +239,19 @@ class Recomendador:
 # --- BLOQUE 6: INTERFAZ DE STREAMLIT (App Principal) ---
 # ====================================================================
 st.set_page_config(layout="wide")
+
+# ---  ANALYTICS  ---
+GOOGLE_ANALYTICS_SCRIPT = """
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-GHWRR564SW"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+
+      gtag('config', 'G-GHWRR564SW');
+    </script>
+"""
+st.html(GOOGLE_ANALYTICS_SCRIPT)
 st.title("♻️ Buscador Inteligente de Centros de Reciclaje")
 st.info("Motor Lógico con Reglas desde Firebase | Conexión segura con st.secrets")
 
