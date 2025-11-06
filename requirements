@@ -1,4 +1,6 @@
 streamlit
-pandas
+streamlit-folium
+folium
 firebase-admin
-streamlit_geolocation
+pandas
+streamlit-js-eval
