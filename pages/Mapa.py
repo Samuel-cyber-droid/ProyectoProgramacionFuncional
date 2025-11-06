@@ -1,34 +1,223 @@
+# ====================================================================
+# --- BLOQUE 1: IMPORTACIONES ---
+# ====================================================================
 import streamlit as st
 import pandas as pd
-from typing import List, Optional, Dict, Any
+from typing import List
 from math import radians, sin, cos, sqrt, atan2
+
+# Componentes de UI
+from streamlit_geolocation import streamlit_geolocation
 import folium
 from streamlit_folium import st_folium
 
-# Import guard para streamlit_js_eval: si no está, no abortamos; usamos fallback.
-try:
-    from streamlit_js_eval import streamlit_js_eval
-    HAS_JS_EVAL = True
-except Exception:
-    streamlit_js_eval = None
-    HAS_JS_EVAL = False
-
-# Firebase
+# Firebase (para la base de datos)
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# -------------------------
-# Configuración de la página
-# -------------------------
-st.set_page_config(page_title="♻️ Buscador de Centros de Reciclaje", layout="wide")
-st.title("♻️ Buscador Inteligente de Centros de Reciclaje")
-st.caption("Ubica centros, filtra por materiales y obtén recomendaciones basadas en reglas (Firestore).")
+# ====================================================================
+# --- BLOQUE 2: CONEXIÓN A FIREBASE (con st.secrets) ---
+# ====================================================================
 
-# -------------------------
-# Utilidades: Haversine
-# -------------------------
-def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Devuelve distancia en kilómetros entre dos pares lat/lon."""
+# Usamos @st.cache_resource para que esto se ejecute UNA SOLA VEZ.
+@st.cache_resource
+def init_firebase():
+    """
+    Inicializa la conexión con Firebase usando las credenciales
+    guardadas en el archivo secrets.toml (st.secrets).
+    """
+    try:
+        if not firebase_admin._apps:  # Evita reinicializar la app
+            # 1. Leemos las credenciales (son de solo lectura)
+            secret_creds = st.secrets["firebase_credentials"]
+            # 2. Hacemos una COPIA a un diccionario normal
+            creds_dict = dict(secret_creds)
+            # 3. Ahora SÍ podemos modificar nuestra copia
+            if 'private_key' in creds_dict:
+                creds_dict['private_key'] = creds_dict['private_key'].replace('\\n', '\n')
+            if not creds_dict:
+                st.error("Error: No se encontraron las 'firebase_credentials' en st.secrets.")
+                return None
+            print("Cargando credenciales desde st.secrets...")
+            # 4. Usamos la COPIA modificada para inicializar
+            cred = credentials.Certificate(creds_dict)
+            firebase_admin.initialize_app(cred)
+            print("--- Conexión a Firebase exitosa (desde st.secrets) ---")
+        return firestore.client()
+    except KeyError:
+        st.error("Error: Faltan las 'firebase_credentials' en tu archivo .streamlit/secrets.toml")
+        return None
+    except Exception as e:
+        st.error(f"Error al inicializar Firebase desde st.secrets: {e}")
+        return None
+
+
+@st.cache_resource
+def load_and_create_centros(_db) -> List['CentroReciclaje']:
+    """Lee la colección 'centros_reciclaje' de Firebase y la convierte en objetos CentroReciclaje."""
+    if _db is None:
+        st.error("No se pudo conectar a Firebase. La aplicación no puede cargar datos.")
+        return []
+
+    print("--- LEYENDO DATOS DESDE FIREBASE ---")
+    centros_ref = _db.collection('centros_reciclaje') # <-- Apuntando a tu colección
+    docs = centros_ref.stream()
+
+    lista_centros = []
+    try:
+        for doc in docs:
+            data = doc.to_dict()
+            lista_centros.append(CentroReciclaje(**data))
+
+        if not lista_centros:
+            # Corregido el typo en el nombre de la colección
+            print("--- ADVERTENCIA: Se conectó a Firebase pero no se encontraron documentos en 'centros_reciclaje' ---")
+            st.warning("Se conectó a Firebase, pero la colección 'centros_reciclaje' está vacía o no se pudo leer.")
+            return []
+
+        print(f"--- Se cargaron {len(lista_centros)} centros desde Firebase ---")
+        return lista_centros
+
+    except Exception as e:
+        st.error(f"Error al leer datos de Firebase. Revisa la estructura de tus documentos: {e}")
+        st.exception(e)
+        return []
+
+
+# ====================================================================
+# --- BLOQUE 3: PARADIGMA POO (Modelos de Datos) ---
+# ====================================================================
+
+class CentroReciclaje:
+    """Clase que representa un único centro de reciclaje. Modela la estructura de nuestros datos."""
+    def __init__(self, nombre=None, lat=None, lon=None, horario=None, materiales=None, ubicacion=None, **kwargs):
+        """
+        Constructor robusto que acepta campos de Firebase.
+        **kwargs ignora campos extra que no usamos.
+        """
+        # Usamos valores por defecto para evitar que la app falle
+        self.nombre = nombre if nombre else "Nombre no disponible"
+        self.lat = float(lat) if lat is not None else 0.0  # Default a 0.0 si falta
+        self.lon = float(lon) if lon is not None else 0.0  # Default a 0.0 si falta
+
+        self.horario = horario if horario else "No disponible"
+
+        # 'ubicacion' es útil para la lógica
+        self.ubicacion = ubicacion if ubicacion else self.nombre
+        self.distance = None  # Se calculará después.
+
+        # Convierte el STRING 'materiales' en una LISTA
+        if isinstance(materiales, str):
+            temp_list = materiales.lower().split(',')
+            self.materiales = [m.strip() for m in temp_list if m.strip()]
+        elif isinstance(materiales, list):
+            self.materiales = [str(m).lower().strip() for m in materiales]
+        else:
+            # Si 'materiales' es None o no existe, crea una lista vacía
+            self.materiales = []
+
+# ====================================================================
+# --- BLOQUE 4: PARADIGMA LÓGICO (Motor de Reglas) ---
+# ====================================================================
+
+class Regla:
+    """Clase que modela una regla 'SI-ENTONCES' leída de Firebase."""
+
+    def __init__(self, condicions_str: str, conclusiones: str):
+        self.conclusiones = conclusiones
+        self.condiciones_list = []  # Lista de tuplas (clave, valor)
+
+        # Parseamos el string de condiciones: "clave1:valor1; clave2:valor2"
+        for cond in condicions_str.split(';'):
+            if ':' in cond:
+                key, val = cond.split(':', 1)  # '1' para que solo separe en el primer ':'
+                self.condiciones_list.append((key.strip().lower(), val.strip().lower()))
+
+    def checar_condiciones(self, centro: CentroReciclaje) -> bool:
+        """
+        Compara este centro (hecho) con las condiciones de esta regla.
+        Devuelve True si TODAS las condiciones se cumplen.
+        """
+        for key, value in self.condiciones_list:
+            if key == 'material':
+                if value not in centro.materiales:
+                    return False
+            elif key == 'horario':
+                if value not in centro.horario.lower():
+                    return False
+            elif key == 'ubicacion':
+                if value != centro.ubicacion.lower():
+                    return False
+            else:
+                pass
+        return True
+
+
+@st.cache_resource
+def load_rules(_db) -> List[Regla]:
+    """Lee la colección 'reglas' de Firebase y la convierte en objetos Regla."""
+    if _db is None:
+        return []
+
+    print("--- LEYENDO REGLAS DESDE FIREBASE ---")
+    reglas_ref = _db.collection('reglas')  # Asegúrate que este nombre sea correcto
+    docs = reglas_ref.stream()
+
+    lista_reglas = []
+    try:
+        doc_count = 0
+        for doc in docs:
+            doc_count += 1
+            data = doc.to_dict()
+
+            print(f"Documento {doc_count} encontrado. Campos: {data.keys()}")
+
+            # 1. Primero, revisamos si existe el campo 'conclusion'
+            if 'conclusion' in data:
+                lista_condiciones_str = []
+
+                # 2. Iteramos sobre todas las claves (campos) del documento
+                for key, value in data.items():
+                    # 3. Si la clave EMPIEZA CON "condicion"...
+                    if key.startswith('condicion'):
+                        # ...añadimos su valor (ej. "material:pet") a nuestra lista
+                        lista_condiciones_str.append(str(value))
+
+                # 4. Si encontramos al menos una condición...
+                if lista_condiciones_str:
+                    # 5. Las unimos en un solo string con ';'
+                    string_condiciones_combinadas = ";".join(lista_condiciones_str)
+
+                    print(
+                        f"¡Éxito! Documento {doc_count} COINCIDE. Añadiendo regla con {len(lista_condiciones_str)} condiciones.")
+
+                    # 6. Creamos la regla con el string combinado
+                    lista_reglas.append(Regla(string_condiciones_combinadas, data['conclusion']))
+                else:
+                    print(
+                        f"AVISO: Documento {doc_count} tiene 'conclusion' pero CERO campos 'condicion...'. Omitiendo.")
+
+            else:
+                # Si no tiene 'conclusion', se omite
+                print(f"AVISO: El Documento {doc_count} fue OMITIDO. No tiene el campo 'conclusion'.")
+
+        if doc_count == 0:
+            print("ADVERTENCIA: La colección 'reglas' existe pero está COMPLETAMENTE VACÍA.")
+
+        print(f"--- Se cargaron {len(lista_reglas)} reglas lógicas desde Firebase ---")
+        return lista_reglas
+
+    except Exception as e:
+        st.error(f"Error al leer la colección 'reglas' de Firebase: {e}")
+        return []
+
+# ====================================================================
+# --- BLOQUE 5: PARADIGMA POO (Lógica de Negocio) Y FUNCIONAL ---
+# ====================================================================
+
+# --- Función Pura (Estilo Funcional) ---
+def haversine(lat1, lon1, lat2, lon2):
+    """Calcula la distancia en kilómetros entre dos puntos geográficos (lat, lon)."""
     R = 6371.0
     lat1_rad, lon1_rad = radians(lat1), radians(lon1)
     lat2_rad, lon2_rad = radians(lat2), radians(lon2)
@@ -36,318 +225,200 @@ def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     dlat = lat2_rad - lat1_rad
     a = sin(dlat / 2) ** 2 + cos(lat1_rad) * cos(lat2_rad) * sin(dlon / 2) ** 2
     c = 2 * atan2(sqrt(a), sqrt(1 - a))
-    return R * c
+    distance = R * c
+    return distance
 
-# -------------------------
-# Modelos de datos
-# -------------------------
-class CentroReciclaje:
-    def __init__(self, nombre: Optional[str]=None, lat: Optional[float]=None, lon: Optional[float]=None,
-                 horario: Optional[str]=None, materiales: Optional[Any]=None, ubicacion: Optional[str]=None, **kwargs):
-        self.nombre = nombre if nombre else "Nombre no disponible"
-        self.lat = float(lat) if lat is not None else 0.0
-        self.lon = float(lon) if lon is not None else 0.0
-        self.horario = horario if horario else "No disponible"
-        self.ubicacion = ubicacion if ubicacion else self.nombre
-        self.distance: Optional[float] = None
 
-        # Normalizar materiales a lista de lowercase
-        if isinstance(materiales, str):
-            temp_list = materiales.split(',')
-            self.materiales = [m.strip().lower() for m in temp_list if m.strip()]
-        elif isinstance(materiales, list):
-            self.materiales = [str(m).lower().strip() for m in materiales]
-        else:
-            self.materiales = []
-
-# -------------------------
-# Motor de reglas
-# -------------------------
-class Regla:
-    def __init__(self, condicions_str: str, conclusiones: str):
-        self.conclusiones = conclusiones
-        self.condiciones_list = []
-        for cond in condicions_str.split(';'):
-            if ':' in cond:
-                k, v = cond.split(':', 1)
-                self.condiciones_list.append((k.strip().lower(), v.strip().lower()))
-
-    def checar_condiciones(self, centro: CentroReciclaje) -> bool:
-        for key, val in self.condiciones_list:
-            if key == 'material':
-                if val not in centro.materiales:
-                    return False
-            elif key == 'horario':
-                if val not in centro.horario.lower():
-                    return False
-            elif key == 'ubicacion':
-                if val != centro.ubicacion.lower():
-                    return False
-            else:
-                # Si hay una condición desconocida, la ignoramos (o podrías añadir más reglas)
-                pass
-        return True
-
-# -------------------------
-# Inicializar Firebase (st.secrets)
-# -------------------------
-@st.cache_resource
-def init_firebase_from_secrets() -> Optional[firestore.Client]:
-    try:
-        # Debes tener en Settings->Secrets un bloque [firebase] similar al ejemplo que te di.
-        if not firebase_admin._apps:
-            firebase_secret = st.secrets["firebase"]
-            # Construimos dict con saltos de línea correctos en private_key
-            creds = dict(firebase_secret)
-            if "private_key" in creds:
-                creds["private_key"] = creds["private_key"].replace("\\n", "\n")
-            cred = credentials.Certificate(creds)
-            firebase_admin.initialize_app(cred)
-        return firestore.client()
-    except KeyError:
-        st.error("Error: No se encontró la configuración 'firebase' en st.secrets. Revisa Settings → Secrets.")
-        return None
-    except Exception as e:
-        st.error(f"Error al inicializar Firebase: {e}")
-        st.exception(e)
-        return None
-
-# -------------------------
-# Cargar centros y reglas
-# -------------------------
-@st.cache_resource
-def load_and_create_centros(_db: firestore.Client) -> List[CentroReciclaje]:
-    if _db is None:
-        return []
-    try:
-        docs = _db.collection("centros_reciclaje").stream()
-        centros = []
-        for d in docs:
-            data = d.to_dict()
-            centros.append(CentroReciclaje(**data))
-        return centros
-    except Exception as e:
-        st.error(f"Error leyendo 'centros_reciclaje' desde Firestore: {e}")
-        st.exception(e)
-        return []
-
-@st.cache_resource
-def load_rules(_db: firestore.Client) -> List[Regla]:
-    if _db is None:
-        return []
-    reglas = []
-    try:
-        docs = _db.collection("reglas").stream()
-        for d in docs:
-            data = d.to_dict()
-            # Suponemos que 'conclusion' existe y las condiciones son campos que empiezan con 'condicion'
-            if "conclusion" in data:
-                condiciones = [str(v) for k, v in data.items() if k.startswith("condicion")]
-                if condiciones:
-                    reglas.append(Regla(";".join(condiciones), data["conclusion"]))
-        return reglas
-    except Exception as e:
-        st.error(f"Error leyendo 'reglas' desde Firestore: {e}")
-        st.exception(e)
-        return []
-
-# -------------------------
-# Clase recomendador (lógica)
-# -------------------------
 class Recomendador:
-    def __init__(self, db_client: firestore.Client):
-        self._centros = load_and_create_centros(db_client)
-        self._reglas = load_rules(db_client)
+    """Encapsula toda la lógica de negocio: cargar, filtrar y ordenar los centros."""
+
+    def __init__(self, db_client):
+        # Al crear una instancia, se cargan los HECHOS (centros)
+        self._centros: List[CentroReciclaje] = load_and_create_centros(db_client)
+        # Y también se cargan las REGLAS (lógica)
+        self._reglas: List[Regla] = load_rules(db_client)
 
     def get_all_centros(self) -> List[CentroReciclaje]:
+        """Devuelve la lista completa de centros (cargada desde Firebase)."""
         return self._centros
 
     def get_all_materials(self) -> List[str]:
-        s = set()
-        for c in self._centros:
-            for m in c.materiales:
-                s.add(m.capitalize())
-        return sorted(list(s))
+        """Obtiene una lista única y ordenada de todos los materiales disponibles."""
+        all_mats = set()
+        for centro in self._centros:
+            for material in centro.materiales:
+                all_mats.add(material.capitalize())  # Pone mayúscula inicial
+        return sorted(list(all_mats))
 
+    # --- DEMOSTRACIÓN DE PARADIGMA FUNCIONAL (Sin Cambios) ---
     def filter_by_materials(self, selected_materials: List[str]) -> List[CentroReciclaje]:
+        """Filtra los centros usando la función de orden superior 'filter'."""
         if not selected_materials:
             return self._centros
-        selected_lower = [m.lower() for m in selected_materials]
-        return [c for c in self._centros if all(x in c.materiales for x in selected_lower)]
+        selected_mats_lower = [m.lower() for m in selected_materials]
+        filtered_iterator = filter(
+            lambda centro: all(item in centro.materiales for item in selected_mats_lower),
+            self._centros
+        )
+        return list(filtered_iterator)
 
-    def sort_by_distance(self, user_lat: float, user_lon: float, centros: List[CentroReciclaje]) -> List[CentroReciclaje]:
-        for c in centros:
-            c.distance = haversine(user_lat, user_lon, c.lat, c.lon)
-        return sorted(centros, key=lambda x: x.distance if x.distance is not None else float('inf'))
+    # --- DEMOSTRACIÓN DE PARADIGMA FUNCIONAL (Sin Cambios) ---
+    def sort_by_distance(self, user_lat, user_lon, centros: List[CentroReciclaje]) -> List[CentroReciclaje]:
+        """Ordena los centros usando la función 'sorted' con una 'key' lambda."""
+        for centro in centros:
+            centro.distance = haversine(user_lat, user_lon, centro.lat, centro.lon)
+        return sorted(centros, key=lambda centro: centro.distance)
 
-    def aplicar_motor_logico(self, centros_filtrados: List[CentroReciclaje]) -> Dict[str, List[str]]:
-        resultados = {}
-        for c in centros_filtrados:
-            conclusiones = []
-            for r in self._reglas:
-                if r.checar_condiciones(c):
-                    conclusiones.append(r.conclusiones)
-            if conclusiones:
-                resultados[c.nombre] = conclusiones
-        return resultados
+    # --- METODO DEL MOTOR DE INFERENCIA LÓGICA ---
+    def aplicar_motor_logico(self, centros_filtrados: List[CentroReciclaje]):
+        """
+        Ejecuta el motor de inferencia.
+        Compara los Hechos (centros) contra las Reglas (de Firebase).
+        """
+        print(f"--- Ejecutando motor lógico con {len(self._reglas)} reglas sobre {len(centros_filtrados)} centros ---")
+        resultados_logicos = {}
+        for centro in centros_filtrados:
+            conclusiones_encontradas = []
+            for regla in self._reglas:
+                if regla.checar_condiciones(centro):
+                    conclusiones_encontradas.append(regla.conclusiones)
+            if conclusiones_encontradas:
+                resultados_logicos[centro.nombre] = conclusiones_encontradas
+        return resultados_logicos
 
-# -------------------------
-# Interfaz principal
-# -------------------------
-def main():
-    db_client = init_firebase_from_secrets()
-    if db_client is None:
+
+# ====================================================================
+# --- BLOQUE 6: INTERFAZ DE STREAMLIT (App Principal) ---
+# ====================================================================
+st.set_page_config(layout="wide")
+st.title("♻️ Buscador Inteligente de Centros de Reciclaje")
+st.info("Motor Lógico con Reglas desde Firebase | Conexión segura con st.secrets")
+
+try:
+    # 1. INICIALIZACIÓN (POO)
+    db_client = init_firebase()
+    if db_client:
+        recomendador = Recomendador(db_client)
+    else:
+        st.error("No se pudo inicializar la base de datos. La aplicación se detendrá.")
         st.stop()
 
-    recomendador = Recomendador(db_client)
-
-    # Sidebar: filtros
+    # 2. BARRA LATERAL (INPUTS DEL USUARIO)
     st.sidebar.header("👇 Filtra tu Búsqueda")
     all_materials = recomendador.get_all_materials()
-    selected_materials = st.sidebar.multiselect("1. Selecciona los materiales:", options=all_materials, placeholder="Elige uno o más materiales")
-    filtered_centros = recomendador.filter_by_materials(selected_materials)
 
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("📍 Obtener ubicación del usuario")
-
-    # Intentamos obtener la ubicación vía streamlit_js_eval si está disponible
-    user_lat = None
-    user_lon = None
-    nearest_center = None
-
-    if HAS_JS_EVAL:
-        try:
-            st.sidebar.write("Intentando obtener ubicación desde el navegador (permite el permiso cuando aparezca).")
-            coords = streamlit_js_eval(js_expressions="navigator.geolocation.getCurrentPosition(p=>window.parent.postMessage(p.coords))")
-            # coords puede ser None si el navegador no permite o el mensaje no llega
-            if isinstance(coords, dict) and "latitude" in coords and "longitude" in coords:
-                user_lat = coords["latitude"]
-                user_lon = coords["longitude"]
-            else:
-                # coords a veces vuelve vacío: no confiar 100%
-                user_lat = None
-                user_lon = None
-        except Exception:
-            # No queremos que un fallo de JS rompa la app
-            st.sidebar.warning("No se pudo obtener la ubicación automáticamente (fallo en streamlit_js_eval).")
-            user_lat = None
-            user_lon = None
+    if not all_materials:
+        st.error("No se pudieron cargar datos desde Firebase. Revisa la conexión y la configuración.")
     else:
-        st.sidebar.info("streamlit_js_eval no está instalado. Usa coordenadas manuales o agrégalo al requirements.txt.")
+        selected_materials = st.sidebar.multiselect(
+            "1. Selecciona los materiales:",
+            options=all_materials,
+            placeholder="Elige uno o más materiales"
+        )
 
-    # Fallbacks: entrada manual o ubicación por defecto
-    if user_lat is None or user_lon is None:
-        st.sidebar.markdown("**Fallback:** introduce coordenadas manualmente (si lo deseas).")
-        manual_lat = st.sidebar.text_input("Latitud (manual)", value="")
-        manual_lon = st.sidebar.text_input("Longitud (manual)", value="")
-        if manual_lat.strip() and manual_lon.strip():
-            try:
-                user_lat = float(manual_lat)
-                user_lon = float(manual_lon)
-            except ValueError:
-                st.sidebar.error("Coordenadas manuales no válidas. Deben ser números (ej: 19.4326, -99.1332).")
-                user_lat = None
-                user_lon = None
+        # 3. LÓGICA FUNCIONAL (filter)
+        filtered_centros = recomendador.filter_by_materials(selected_materials)
 
-    # Si aún no hay coords, podemos usar una ubicación por defecto (ejemplo: Ciudad de México)
-    if user_lat is None or user_lon is None:
-        if st.sidebar.checkbox("Usar ubicación por defecto (Ciudad de México)"):
-            user_lat, user_lon = 19.4326, -99.1332
-            st.sidebar.info("Usando ubicación por defecto: Ciudad de México.")
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("📍 Encuentra el más cercano")
+        location = streamlit_geolocation()
 
-    # Procesamiento principal: ordenar por distancia si hay ubicación
-    if user_lat is not None and user_lon is not None:
-        filtered_centros = recomendador.sort_by_distance(user_lat, user_lon, filtered_centros)
+        # 4. PROCESAMIENTO PRINCIPAL
+        user_lat, user_lon = None, None
+        nearest_center = None
+
+        if location and location.get('latitude'):
+            user_lat, user_lon = location['latitude'], location['longitude']
+            st.sidebar.success(f"Ubicación obtenida: Lat: {user_lat:.4f}, Lon: {user_lon:.4f}")
+            # 5. LÓGICA FUNCIONAL (sort)
+            filtered_centros = recomendador.sort_by_distance(user_lat, user_lon, filtered_centros)
+            if filtered_centros:
+                nearest_center = filtered_centros[0]
+
+        # 6. VISUALIZACIÓN DE RESULTADOS (Métricas)
+        col1, col2 = st.columns(2)
+        col1.metric(label="Centros Encontrados", value=len(filtered_centros))
+        if nearest_center:
+            col2.metric(label="Centro más cercano", value=nearest_center.nombre,
+                        delta=f"- {nearest_center.distance:.2f} km",
+                        delta_color="off")
+        st.markdown("---")
+
+        # 7. VISUALIZACIÓN DE RESULTADOS (Mapa y Tabla)
         if filtered_centros:
-            nearest_center = filtered_centros[0]
+            col_map, col_data = st.columns([0.6, 0.4])
 
-    # Métricas principales
-    col1, col2 = st.columns(2)
-    col1.metric(label="Centros encontrados", value=len(filtered_centros))
-    if nearest_center:
-        col2.metric(label="Centro más cercano", value=nearest_center.nombre, delta=f"- {nearest_center.distance:.2f} km", delta_color="off")
-    else:
-        col2.metric(label="Centro más cercano", value="N/A")
+            with col_map:
+                st.subheader("Ubicación en el Mapa")
+                # Corregida la longitud para el centro por defecto
+                map_center = [user_lat, user_lon] if user_lat else [19.4326, -99.1332]
+                zoom_level = 13 if user_lat else 10
+                m = folium.Map(location=map_center, zoom_start=zoom_level)
+                for centro in filtered_centros:
+                    folium.Marker(
+                        location=[centro.lat, centro.lon],
+                        popup=f"<b>{centro.nombre}</b><br>Horario: {centro.horario}",
+                        tooltip="Clic para ver detalles"
+                    ).add_to(m)
+                if user_lat:
+                    folium.Marker(
+                        location=[user_lat, user_lon],
+                        popup="<b>Tu Ubicación</b>",
+                        icon=folium.Icon(color='red', icon='user', prefix='fa')
+                    ).add_to(m)
+                if nearest_center:
+                    points = [(user_lat, user_lon), (nearest_center.lat, nearest_center.lon)]
+                    folium.PolyLine(locations=points, color='red', weight=2, dash_array='5, 10').add_to(m)
+                st_folium(m, width='stretch')
 
-    st.markdown("---")
+            with col_data:
+                st.subheader("Detalles de los Centros (ordenados por distancia)")
+                df_display_data = []
+                for centro in filtered_centros:
+                    data = vars(centro).copy()
+                    if data['distance'] is not None:
+                        data['distance'] = f"{data['distance']:.2f} km"
+                    # Corregida la capitalización para cada material
+                    data['materiales'] = ", ".join(m.capitalize() for m in data['materiales'])
+                    df_display_data.append(data)
 
-    # Visualización: mapa + tabla
-    if filtered_centros:
-        col_map, col_data = st.columns([0.6, 0.4])
-
-        with col_map:
-            st.subheader("Ubicación en el Mapa")
-            map_center = [user_lat, user_lon] if user_lat else [19.4326, -99.1332]
-            zoom_level = 13 if user_lat else 10
-            m = folium.Map(location=map_center, zoom_start=zoom_level)
-            # Marcadores de centros
-            for c in filtered_centros:
-                folium.Marker(
-                    location=[c.lat, c.lon],
-                    popup=f"<b>{c.nombre}</b><br>Horario: {c.horario}",
-                    tooltip=c.ubicacion
-                ).add_to(m)
-            # Marcador del usuario
-            if user_lat:
-                folium.Marker(
-                    location=[user_lat, user_lon],
-                    popup="<b>Tu Ubicación</b>",
-                    icon=folium.Icon(color='red', icon='user', prefix='fa')
-                ).add_to(m)
-            # Línea al centro más cercano
-            if nearest_center and user_lat:
-                folium.PolyLine(locations=[(user_lat, user_lon), (nearest_center.lat, nearest_center.lon)],
-                                weight=3, dash_array='5, 10').add_to(m)
-
-            st_folium(m, width='100%', height=600)
-
-        with col_data:
-            st.subheader("Detalles (ordenados)")
-            df_display = []
-            for c in filtered_centros:
-                entry = {
-                    "nombre": c.nombre,
-                    "distance": f"{c.distance:.2f} km" if c.distance is not None else "N/A",
-                    "ubicacion": c.ubicacion,
-                    "horario": c.horario,
-                    "materiales": ", ".join([m.capitalize() for m in c.materiales])
-                }
-                df_display.append(entry)
-            df = pd.DataFrame(df_display)
-            st.dataframe(df, use_container_width=True)
-
-    else:
-        st.warning("No se encontraron centros con esos filtros.")
-
-    st.markdown("---")
-    # Motor lógico: mostrar resultados si hay centros
-    with st.expander("Ver Recomendaciones del Motor Lógico (de Firebase)"):
-        if filtered_centros:
-            resultados = recomendador.aplicar_motor_logico(filtered_centros)
-            if resultados:
-                st.subheader("💡 Recomendaciones especiales:")
-                for nombre, conclusiones in resultados.items():
-                    st.markdown(f"#### {nombre}")
-                    for c in conclusiones:
-                        st.success(f"**Regla disparada:** {c}")
-                    st.markdown("---")
-            else:
-                st.success("✅ Ninguno de los centros filtrados disparó una regla lógica.")
+                df_display = pd.DataFrame(df_display_data)
+                st.dataframe(df_display, width='stretch',
+                             column_order=("nombre", "distance", "ubicacion", "horario", "materiales"))
         else:
-            st.info("No hay centros en los que aplicar reglas.")
+            st.warning("No se encontraron centros de reciclaje con esos filtros.")
 
-    # Botón opcional para guardar la ubicación del usuario en Firestore
-    if user_lat and user_lon:
-        if st.button("Guardar mi ubicación en Firestore"):
-            try:
-                db_client.collection("ubicaciones").add({
-                    "latitud": float(user_lat),
-                    "longitud": float(user_lon)
-                })
-                st.success("Ubicación guardada en Firestore.")
-            except Exception as e:
-                st.error(f"No se pudo guardar la ubicación: {e}")
-                st.exception(e)
+        # 8. VISUALIZACIÓN DE PROGRAMACIÓN LÓGICA (Motor de Reglas)
+        st.markdown("---")
+        with st.expander("Ver Recomendaciones del Motor Lógico (de Firebase)"):
 
-if __name__ == "__main__":
-    main()
+            if filtered_centros:
+                # Ejecutamos el motor lógico SOBRE LOS CENTROS FILTRADOS
+                resultados_logicos = recomendador.aplicar_motor_logico(filtered_centros)
+
+                st.info("El motor comparó los centros filtrados contra las reglas de Firebase.")
+
+                if resultados_logicos:
+
+                    st.subheader("💡 Recomendaciones Especiales Encontradas:")
+
+                    for nombre_centro, conclusiones in resultados_logicos.items():
+
+                        # Mostramos el nombre del centro como un encabezado
+                        st.markdown(f"#### {nombre_centro}")
+
+                        # Iteramos sobre cada conclusión (regla disparada) para ese centro
+                        for conclusion in conclusiones:
+                            # st.success muestra un mensaje bonito en una caja verde
+                            st.success(f"**Regla disparada:** {conclusion}")
+
+                        st.markdown("---")  # Un separador
+
+                else:
+                    st.success("✅ Ninguno de los centros filtrados disparó una regla lógica.")
+            else:
+                st.warning("No hay centros para aplicar el motor lógico.")
+
+except Exception as e:
+    st.error(f"Ocurrió un error inesperado en la aplicación: {e}")
+    st.exception(e)
