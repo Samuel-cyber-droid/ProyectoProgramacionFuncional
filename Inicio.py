@@ -24,7 +24,7 @@ GOOGLE_ANALYTICS_SCRIPT= """
       gtag('config', 'G-GHWRR564SW');
     </script>
 """
-st.html(GOOGLE_ANALYTICS_SCRIPT)
+st.markdown(GOOGLE_ANALYTICS_SCRIPT, unsafe_allow_html=True)
 
 # --- GESTIÓN DE RUTAS A RECURSOS (ASSETS) ---
 # Definimos una carpeta base para los recursos gráficos.

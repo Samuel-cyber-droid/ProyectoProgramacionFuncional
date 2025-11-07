@@ -251,7 +251,7 @@ GOOGLE_ANALYTICS_SCRIPT = """
       gtag('config', 'G-GHWRR564SW');
     </script>
 """
-st.html(GOOGLE_ANALYTICS_SCRIPT)
+st.markdown(GOOGLE_ANALYTICS_SCRIPT, unsafe_allow_html=True)
 st.title("♻️ Buscador Inteligente de Centros de Reciclaje")
 st.info("Motor Lógico con Reglas desde Firebase | Conexión segura con st.secrets")
 
