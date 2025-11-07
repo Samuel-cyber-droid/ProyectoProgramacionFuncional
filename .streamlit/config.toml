@@ -1,0 +1,5 @@
+# Este es tu archivo .streamlit/config.toml
+
+[server]
+# Esta línea le da permiso al navegador para cargar scripts
+contentSecurityPolicy = "script-src 'self' 'unsafe-inline' https://www.googletagmanager.com; object-src 'none';"
